@@ -1,0 +1,29 @@
+# ── Image data ──────────────────────────────────────────────
+data/
+# The data folder contains all images — too large for GitHub
+# The / at the end means "the whole folder and everything inside it"
+ 
+# ── Virtual environment ──────────────────────────────────────
+venv/
+# The venv folder is recreated with "pip install -r requirements.txt"
+# There is no point uploading it — it is large and machine-specific
+ 
+# ── Python compiled files ─────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+# Python automatically creates these when running the code
+# They are auto-generated — never need to be committed
+ 
+# ── VS Code settings ──────────────────────────────────────────
+.vscode/
+# VS Code saves personal editor settings here — not part of the project
+ 
+# ── Jupyter checkpoints ───────────────────────────────────────
+.ipynb_checkpoints/
+# Jupyter autosaves notebook checkpoints — not needed on GitHub
+ 
+# ── Operating system files ────────────────────────────────────
+.DS_Store
+Thumbs.db
+# Mac and Windows create these hidden files automatically — not project files

@@ -1,0 +1,20 @@
+opencv-python
+# OpenCV — the main image processing library (cv2)
+ 
+numpy
+# NumPy — for fast numerical operations on image arrays
+ 
+scipy
+# SciPy — scientific computing (used for advanced filters)
+ 
+matplotlib
+# Matplotlib — for displaying and saving images and charts
+ 
+scikit-image
+# Scikit-image — additional image processing tools
+ 
+pillow
+# Pillow — image file reading/writing support
+ 
+jupyter
+# Jupyter — for running notebook files (.ipynb) to test features
