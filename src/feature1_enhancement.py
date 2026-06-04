@@ -1,286 +1,301 @@
 """
-Feature 1 — Adaptive Disaster-Aware Image Enhancement
-Objective 1: Enhance images affected by noise, poor illumination, and glare.
-
-Each enhancement step checks whether it is actually needed before applying.
-A well-lit, low-noise image passes through mostly unchanged.
-A dark, noisy image gets the corrections it needs.
-
-Steps:
-  1a. Grayscale conversion        — always applied
-  1b. CLAHE                       — only if contrast (std) is below threshold
-  1c. Gamma correction            — only if image is too dark OR too bright
-  1d. Median filter               — only if salt-and-pepper noise is detected
-
-Run:  python feature1_enhancement.py path/to/image.jpg
-      python feature1_enhancement.py              <- runs on all images in data/raw/
-Output: data/results/feature1/
+feature1_enhancement.py
+-----------------------
+PURPOSE : Standardize every input image before any damage analysis begins.
+          Corrects resolution, brightness, contrast, and noise so that all
+          downstream features operate on a clean, consistent signal.
+INPUTS  : image_path (str) — path to any raw road photograph
+OUTPUTS : image    (BGR  ndarray 480×640×3) — colour original, kept for F2/F13
+          enhanced (gray ndarray 480×640)   — processed grayscale for F3–F11
+          profile  (dict)                   — image-condition flags for F2–F11
+FEEDS   : ALL downstream features (F2 – F13)
 """
 
 import cv2
 import numpy as np
 import os
 import sys
-import glob
 
-# ── Folders ────────────────────────────────────────────────────────────────────
-RAW_DIR     = "data/raw"
-RESULTS_DIR = "data/results/feature1"
-os.makedirs(RESULTS_DIR, exist_ok=True)
+# Add src/ to path so utils.py is importable when running this file directly
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import save_result, compute_stats, profile_image, make_grid
 
-# ── Thresholds that decide whether each step is needed ────────────────────────
-CLAHE_STD_THRESHOLD    = 45    # apply CLAHE if pixel std deviation is below this
-GAMMA_DARK_THRESHOLD   = 85    # apply brightening if mean brightness is below this
-GAMMA_BRIGHT_THRESHOLD = 190   # apply darkening  if mean brightness is above this
-GAMMA_DARK_VALUE       = 1.4   # gamma when image is too dark  (> 1 = brighter)
-GAMMA_BRIGHT_VALUE     = 0.7   # gamma when image is too bright(< 1 = darker)
-NOISE_THRESHOLD        = 0.015 # apply median filter if noise pixel fraction exceeds this
-
-# ── Label drawing ──────────────────────────────────────────────────────────────
-FONT       = cv2.FONT_HERSHEY_SIMPLEX
-FONT_SCALE = 0.52
-FONT_COLOR = (255, 255, 0)   # yellow
-FONT_THICK = 2
+# ── Tunable Parameters ──────────────────────────────────────────────────────────
+RESIZE_WH     = (640, 480)    # (width, height) — standard for all pipeline images
+                               # 640×480 chosen: fast to process, kernels stay meaningful
+CLAHE_TILE    = (8, 8)        # CLAHE tile grid — 8×8 divides 480/640 evenly into 60/80 px tiles
+NOISE_THRESH  = 0.015         # >1.5 % of pixels near black/white = salt-and-pepper noise present
 
 
-def put_label(img, text, pos=(10, 26)):
-    """Draw yellow text with a black background so it is readable on any image."""
-    (tw, th), _ = cv2.getTextSize(text, FONT, FONT_SCALE, FONT_THICK)
-    x, y = pos
-    cv2.rectangle(img, (x - 3, y - th - 5), (x + tw + 3, y + 3), (0, 0, 0), -1)
-    cv2.putText(img, text, (x, y), FONT, FONT_SCALE, FONT_COLOR, FONT_THICK)
-    return img
-
-
-def to_display(gray, label):
-    """Convert grayscale to BGR and add a label — used for saving/showing."""
-    d = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    put_label(d, label)
-    return d
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 0 — Load and resize
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def load_image(image_path):
-    """Load image from disk and resize to 640x480 so all kernel sizes stay valid."""
-    img = cv2.imread(image_path)
-    if img is None:
-        print(f"[ERROR] Cannot read: {image_path}")
-        return None
-    img = cv2.resize(img, (640, 480))
-    return img
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1a — Grayscale (always applied)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def convert_to_grayscale(image):
-    """
-    Convert BGR to grayscale.
-    Always applied: crack and damage detection uses intensity contrast, not colour.
-    """
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    mean = int(np.mean(gray))
-    std  = int(np.std(gray))
-    label = f"1a Grayscale | mean={mean}  std={std}"
-    print(f"  [1a] Grayscale done — mean brightness={mean}, contrast std={std}")
-    return gray, to_display(gray, label)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1b — CLAHE (only if contrast is too low)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def apply_clahe(gray):
-    """
-    CLAHE: enhances local contrast by equalising small tiles (8x8) separately.
-    Skipped if the image already has good contrast (std >= CLAHE_STD_THRESHOLD).
-    Prevents over-brightening images that are already well-lit.
-    """
-    std = int(np.std(gray))
-
-    if std >= CLAHE_STD_THRESHOLD:
-        label = f"1b CLAHE SKIPPED | std={std} >= {CLAHE_STD_THRESHOLD} (already ok)"
-        print(f"  [1b] CLAHE skipped — contrast std={std} is good enough")
-        return gray, to_display(gray, label), False
-
-    clahe     = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced  = clahe.apply(gray)
-    std_after = int(np.std(enhanced))
-    label = f"1b CLAHE APPLIED | std: {std} -> {std_after}"
-    print(f"  [1b] CLAHE applied — contrast std: {std} -> {std_after}")
-    return enhanced, to_display(enhanced, label), True
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1c — Gamma correction (only if image is too dark or too bright)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def apply_gamma_correction(gray):
-    """
-    Gamma < 1 darkens, gamma > 1 brightens.
-    Skipped if mean brightness is already in a normal range.
-    Prevents washing out images that are already correctly exposed.
-    """
-    mean = int(np.mean(gray))
-
-    if GAMMA_DARK_THRESHOLD <= mean <= GAMMA_BRIGHT_THRESHOLD:
-        label = f"1c Gamma SKIPPED | mean={mean} in normal range [{GAMMA_DARK_THRESHOLD}-{GAMMA_BRIGHT_THRESHOLD}]"
-        print(f"  [1c] Gamma skipped — mean={mean} is in the normal range")
-        return gray, to_display(gray, label), 1.0
-
-    if mean < GAMMA_DARK_THRESHOLD:
-        gamma  = GAMMA_DARK_VALUE
-        reason = f"too dark (mean={mean})"
-    else:
-        gamma  = GAMMA_BRIGHT_VALUE
-        reason = f"too bright (mean={mean})"
-
-    inv_gamma = 1.0 / gamma
-    lut = np.array(
-        [(i / 255.0) ** inv_gamma * 255 for i in range(256)], dtype=np.uint8
-    )
-    corrected  = cv2.LUT(gray, lut)
-    mean_after = int(np.mean(corrected))
-    label = f"1c Gamma={gamma} ({reason}) | mean: {mean} -> {mean_after}"
-    print(f"  [1c] Gamma={gamma} applied ({reason}) — mean: {mean} -> {mean_after}")
-    return corrected, to_display(corrected, label), gamma
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# STEP 1d — Median filter (only if noise is detected)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def apply_median_filter(gray):
-    """
-    Removes salt-and-pepper noise (random bright/dark specks).
-    Skipped if the fraction of outlier pixels is below NOISE_THRESHOLD.
-    Skipping preserves fine crack detail on already-clean images.
-    """
-    total_px    = gray.size
-    outlier_px  = int(np.sum((gray < 15) | (gray > 240)))
-    noise_ratio = outlier_px / total_px
-
-    if noise_ratio < NOISE_THRESHOLD:
-        label = f"1d Median SKIPPED | noise={noise_ratio:.4f} < {NOISE_THRESHOLD}"
-        print(f"  [1d] Median filter skipped — noise ratio={noise_ratio:.4f} is low")
-        return gray, to_display(gray, label), False
-
-    denoised      = cv2.medianBlur(gray, 5)
-    outlier_after = int(np.sum((denoised < 15) | (denoised > 240)))
-    noise_after   = outlier_after / total_px
-    label = f"1d Median APPLIED | noise: {noise_ratio:.4f} -> {noise_after:.4f}"
-    print(f"  [1d] Median applied — noise ratio: {noise_ratio:.4f} -> {noise_after:.4f}")
-    return denoised, to_display(denoised, label), True
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MASTER FUNCTION
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def enhance_image(image_path):
     """
-    Run all four adaptive enhancement steps on one image.
-    Saves each step output + a 2x3 comparison grid.
-    Returns the final enhanced grayscale image for use by Feature 2+.
+    Load a raw road image, standardize its resolution, convert to grayscale,
+    and apply adaptive CLAHE to boost local contrast where needed.
+
+    Steps implemented: 1a (load/resize/gray), 1b (adaptive CLAHE).
+    Steps 1c–1f (gamma, median, profile finalisation) added in later sessions.
+
+    Parameters
+    ----------
+    image_path : str   path to input image (JPG, PNG, etc.)
+
+    Returns
+    -------
+    image    : np.ndarray  BGR  480×640×3  — colour original (kept for F2/F13)
+    enhanced : np.ndarray  gray 480×640    — grayscale (used by F3–F11)
+    profile  : dict        image-condition flags (populated fully in Step 1f)
     """
-    original = load_image(image_path)
-    if original is None:
-        return None
 
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    out_dir   = os.path.join(RESULTS_DIR, base_name)
-    os.makedirs(out_dir, exist_ok=True)
-
-    print(f"\n── Feature 1: {base_name} ──")
-
-    # ── Original display panel ────────────────────────────────────────────────
-    orig_disp = original.copy()
-    put_label(orig_disp, "Original (colour)")
-
-    # ── Run steps ─────────────────────────────────────────────────────────────
-    gray,   disp_gray                     = convert_to_grayscale(original)
-    clahe_, disp_clahe, clahe_applied     = apply_clahe(gray)
-    gamma_, disp_gamma, gamma_val         = apply_gamma_correction(clahe_)
-    final,  disp_final, median_applied    = apply_median_filter(gamma_)
-
-    # ── Save each step ────────────────────────────────────────────────────────
-    cv2.imwrite(os.path.join(out_dir, "step1a_grayscale.jpg"), disp_gray)
-    cv2.imwrite(os.path.join(out_dir, "step1b_clahe.jpg"),     disp_clahe)
-    cv2.imwrite(os.path.join(out_dir, "step1c_gamma.jpg"),     disp_gamma)
-    cv2.imwrite(os.path.join(out_dir, "step1d_median.jpg"),    disp_final)
-
-    # ── Difference image (shows what changed overall) ─────────────────────────
-    diff         = cv2.absdiff(gray, final)
-    diff_bright  = cv2.convertScaleAbs(diff, alpha=6)  # amplify so small changes are visible
-    diff_display = cv2.cvtColor(diff_bright, cv2.COLOR_GRAY2BGR)
-    changed_px   = int(np.sum(diff > 5))
-    put_label(diff_display, f"Diff (x6) | changed px={changed_px}")
-
-    # ── Annotate final panel with what was applied ────────────────────────────
-    steps_applied = []
-    if clahe_applied:    steps_applied.append("CLAHE")
-    if gamma_val != 1.0: steps_applied.append(f"Gamma={gamma_val}")
-    if median_applied:   steps_applied.append("Median")
-    if not steps_applied:
-        steps_applied = ["None (image was fine)"]
-
-    final_disp = disp_final.copy()
-    put_label(final_disp, f"Final | Applied: {', '.join(steps_applied)}", pos=(10, 26))
-    put_label(final_disp, f"mean={int(np.mean(final))}  std={int(np.std(final))}", pos=(10, 50))
-
-    # ── Build 2x3 comparison grid ─────────────────────────────────────────────
-    row1 = np.hstack([orig_disp, disp_gray, disp_clahe])
-    row2 = np.hstack([disp_gamma, final_disp, diff_display])
-    grid = np.vstack([row1, row2])
-    scale = min(1.0, 1280 / grid.shape[1])  # shrink to fit screen
-    grid  = cv2.resize(grid, (0, 0), fx=scale, fy=scale)
-
-    grid_path = os.path.join(out_dir, "FEATURE1_grid.jpg")
-    cv2.imwrite(grid_path, grid)
-
-    # ── Console summary ───────────────────────────────────────────────────────
-    print(f"  Steps applied  : {', '.join(steps_applied)}")
-    print(f"  Final mean     : {int(np.mean(final))}   std: {int(np.std(final))}")
-    print(f"  Saved to       : {out_dir}/")
-
-    # ── Show grid window ──────────────────────────────────────────────────────
-    cv2.imshow(f"Feature 1 — {base_name}", grid)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    return final   # pass this grayscale image into Feature 2
+    # ══════════════════════════════════════════════════════════════════════════════
+    # STEP 1a — Load, resize, convert to grayscale
+    # ══════════════════════════════════════════════════════════════════════════════
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Entry point — single image or batch over data/raw/
-# ═══════════════════════════════════════════════════════════════════════════════
+    # ── Step 1a-i: Load image from disk ───────────────────────────────────────
+    # cv2.imread returns BGR (not RGB) — all cv2 functions expect BGR ordering.
+    # Returns None if the path is wrong; catch this early so the error is clear.
+    image = cv2.imread(image_path)
+    if image is None:
+        raise FileNotFoundError(
+            f"enhance_image: could not read image at '{image_path}'. "
+            "Check the path and file format."
+        )
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        enhance_image(sys.argv[1])
+    # ── Step 1a-ii: Resize to standard resolution ─────────────────────────────
+    # INTER_AREA is the correct interpolation for downscaling:
+    #   - averages pixels in the source region → no aliasing artefacts
+    #   - INTER_LINEAR / CUBIC would introduce ringing at sharp crack edges
+    # INTER_LINEAR used for upscaling (rarely needed for road datasets).
+    h_orig, w_orig = image.shape[:2]
+    target_w, target_h = RESIZE_WH   # (640, 480)
+
+    if w_orig > target_w or h_orig > target_h:
+        interp = cv2.INTER_AREA       # shrinking → area average
     else:
-        # Find all images under data/raw/ (rdd2022, crackforest, rescuenet subfolders)
-        patterns = [
-            os.path.join(RAW_DIR, "**", "*.jpg"),
-            os.path.join(RAW_DIR, "**", "*.png"),
-            os.path.join(RAW_DIR, "**", "*.jpeg"),
-        ]
-        images = []
-        for p in patterns:
-            images.extend(glob.glob(p, recursive=True))
+        interp = cv2.INTER_LINEAR     # growing  → bilinear
 
-        if not images:
-            print(f"[ERROR] No images found under '{RAW_DIR}/'")
-            print("  Pass a single image:  python feature1_enhancement.py path/to/img.jpg")
-            print("  Or put images in  :   data/raw/rdd2022/   data/raw/crackforest/   etc.")
+    image = cv2.resize(image, (target_w, target_h), interpolation=interp)
+    # image.shape is now (480, 640, 3) — confirmed for every downstream kernel
+
+    # ── Step 1a-iii: Convert to grayscale ─────────────────────────────────────
+    # Road damage is a light/dark contrast signal, not a colour signal.
+    # Carrying BGR through the pipeline triples memory and adds no detection value.
+    # cv2.COLOR_BGR2GRAY applies the ITU-R BT.601 luminance formula:
+    #   Y = 0.114·B + 0.587·G + 0.299·R
+    # This weighting matches human brightness perception and preserves crack contrast.
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # gray.shape is now (480, 640) — single channel, uint8, 0–255
+
+    # ── Step 1a-iv: Profile the raw grayscale image ───────────────────────────
+    # profile_image() examines brightness, contrast, wetness, and scene type.
+    # Running it on the raw (pre-enhancement) gray gives an honest baseline —
+    # enhancement hasn't changed the statistics yet.
+    # Downstream features (F3–F6) read these flags to adapt their parameters.
+    profile = profile_image(image, gray)
+
+    # enhanced starts as raw gray; Steps 1b–1e modify it in place progressively.
+    enhanced = gray.copy()
+
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # STEP 1b — Adaptive CLAHE — local contrast enhancement
+    # ══════════════════════════════════════════════════════════════════════════════
+
+
+    # CLAHE divides the image into CLAHE_TILE (8×8) tiles and equalizes each
+    # independently, so dark corners are boosted without over-brightening bright
+    # areas — global histogram equalization would do both at once and destroy the
+    # contrast ratio between crack (dark) and road surface (lighter).
+    #
+    # Applied only when std < 45: a high-std image already has strong local
+    # contrast between damage and surface; forcing CLAHE introduces tile-boundary
+    # artefacts that look like cracks to F5.
+    #
+    # clipLimit scales with how poor the contrast is:
+    #   std < 30  → very flat image → clip = 3.0  (strongest boost allowed)
+    #   std < 45  → low contrast   → clip = 2.0  (moderate boost)
+    #   std ≥ 45  → skip entirely  (no CLAHE applied)
+    std_val = float(np.std(enhanced))
+
+    if std_val < 45:                           # contrast is poor enough to warrant CLAHE
+        clip_lim = 3.0 if std_val < 30 else 2.0
+        clahe    = cv2.createCLAHE(
+            clipLimit=clip_lim,
+            tileGridSize=CLAHE_TILE            # (8,8) tiles over 480×640 → 60×80 px each
+        )
+        enhanced = clahe.apply(enhanced)
+        # enhanced std will have increased; downstream steps see a higher-contrast image
+
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # STEP 1c — Adaptive Gamma Correction — fix overall brightness
+    # ══════════════════════════════════════════════════════════════════════════════
+
+
+    # Gamma remaps brightness via a power curve: out = (in/255)^(1/γ) × 255
+    # γ > 1 brightens (exponent < 1 pulls dark values up toward mid-grey)
+    # γ < 1 darkens  (exponent > 1 pushes bright values down)
+    # Applied AFTER CLAHE so we correct overall level, not local contrast.
+    # Skip if mean is already in the healthy 85–175 range (γ = 1.0 = identity).
+    mean_val = float(np.mean(enhanced))
+
+    if   mean_val < 60:   gamma = 1.60   # very dark (night/flood shadow) → strong brighten
+    elif mean_val < 85:   gamma = 1.35   # dark → gentle brighten
+    elif mean_val > 185:  gamma = 0.70   # washed-out/overexposed → strong darken
+    elif mean_val > 155:  gamma = 0.85   # slightly bright → gentle darken
+    else:                 gamma = 1.00   # 85–155 range → no change needed
+
+    if gamma != 1.0:
+        # Build a 256-entry LUT: index = input value, value = corrected output
+        # LUT avoids computing pow() for every pixel — 256 lookups vs 307,200
+        lut      = np.array(
+            [(i / 255.0) ** (1.0 / gamma) * 255 for i in range(256)],
+            dtype=np.uint8
+        )
+        enhanced = cv2.LUT(enhanced, lut)
+
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # STEP 1d — Median Filter — remove salt-and-pepper noise
+    # ══════════════════════════════════════════════════════════════════════════════
+
+
+    # Salt-and-pepper = isolated pixels at extreme brightness (sensor noise,
+    # rain drops, compression artefacts). They produce false crack detections
+    # in F5 because they create sharp local contrast exactly like crack edges.
+    #
+    # Median filter: replaces each pixel with the median of its 5×5 neighbourhood.
+    # Unlike Gaussian blur, a single outlier pixel cannot drag the median —
+    # it must be the majority value to influence the result.
+    # This preserves real crack edges while erasing isolated speckles.
+    #
+    # Applied only when noise fraction > NOISE_THRESH (1.5 %):
+    # unnecessary median filtering marginally blurs thin hairline cracks.
+    near_black = int(np.sum(enhanced < 10))
+    near_white = int(np.sum(enhanced > 245))
+    noise_frac = (near_black + near_white) / float(enhanced.size)
+
+    if noise_frac > NOISE_THRESH:
+        enhanced = cv2.medianBlur(enhanced, 5)   # 5×5 kernel — smallest size that
+                                                  # clears multi-pixel speckle clusters
+
+
+    # ══════════════════════════════════════════════════════════════════════════════
+    # STEP 1e — Re-profile on the fully enhanced image
+    # ══════════════════════════════════════════════════════════════════════════════
+
+
+    # Steps 1b–1d changed brightness, contrast, and noise — the profile computed
+    # in Step 1a on raw gray may now have stale flags (e.g. is_dark was True but
+    # gamma correction has brought mean into the normal range).
+    # Re-running profile_image ensures F3–F6 receive flags that match the actual
+    # enhanced image they will process, not the uncorrected original.
+    profile = profile_image(image, enhanced)   # overwrites the Step 1a profile
+
+    return image, enhanced, profile
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STANDALONE TEST
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == '__main__':
+    import sys
+    from utils import get_all_test_images
+
+    # ── Image selection ───────────────────────────────────────────────────────
+    # Single image mode:  python feature1_enhancement.py path/to/image.jpg
+    # Batch mode:         python feature1_enhancement.py
+    if len(sys.argv) > 1:
+        test_images = [(sys.argv[1], 'manual')]
+    else:
+        test_images = get_all_test_images()
+        if not test_images:
+            print("No images found in data/raw/. Add images and retry.")
             sys.exit(1)
 
-        print(f"[INFO] Found {len(images)} image(s) — processing all...\n")
-        for img_path in images:
-            enhance_image(img_path)
+    print(f"\n=== Feature 1 — Steps 1a–1e | {len(test_images)} image(s) ===\n")
 
-    print("\n[DONE] Feature 1 complete.")
+    passed = 0
+    failed = []
+
+    for img_path, dataset in test_images:
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        print(f"[{dataset}] {base_name} ...", end=' ', flush=True)
+
+        try:
+            # ── Run pipeline ──────────────────────────────────────────────────
+            raw         = cv2.imread(img_path)
+            raw         = cv2.resize(raw, RESIZE_WH, interpolation=cv2.INTER_AREA)
+            gray_raw    = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+
+            # 1b CLAHE intermediate
+            std_val = float(np.std(gray_raw))
+            if std_val < 45:
+                clip_lim    = 3.0 if std_val < 30 else 2.0
+                after_clahe = cv2.createCLAHE(clipLimit=clip_lim,
+                                               tileGridSize=CLAHE_TILE).apply(gray_raw)
+            else:
+                after_clahe = gray_raw.copy()
+
+            # 1c gamma intermediate
+            mean_val = float(np.mean(after_clahe))
+            if   mean_val < 60:   gamma = 1.60
+            elif mean_val < 85:   gamma = 1.35
+            elif mean_val > 185:  gamma = 0.70
+            elif mean_val > 155:  gamma = 0.85
+            else:                 gamma = 1.00
+            if gamma != 1.0:
+                lut         = np.array([(i/255.0)**(1.0/gamma)*255
+                                        for i in range(256)], dtype=np.uint8)
+                after_gamma = cv2.LUT(after_clahe, lut)
+            else:
+                after_gamma = after_clahe.copy()
+
+            # 1d median intermediate
+            nb = int(np.sum(after_gamma < 10))
+            nw = int(np.sum(after_gamma > 245))
+            nf = (nb + nw) / float(after_gamma.size)
+            after_median = cv2.medianBlur(after_gamma, 5) if nf > NOISE_THRESH else after_gamma.copy()
+
+            # Full pipeline output
+            image, enhanced, profile = enhance_image(img_path)
+
+            # ── Save outputs ──────────────────────────────────────────────────
+            save_result(image,        1, base_name, 'step1a_original')
+            save_result(gray_raw,     1, base_name, 'step1a_gray')
+            save_result(after_clahe,  1, base_name, 'step1b_clahe')
+            save_result(after_gamma,  1, base_name, 'step1c_gamma')
+            save_result(after_median, 1, base_name, 'step1d_median')
+            save_result(enhanced,     1, base_name, 'step1e_final')
+
+            grid = make_grid(
+                [raw, gray_raw, after_clahe, after_gamma, after_median, enhanced],
+                labels=['1a:Original','1a:Gray','1b:CLAHE',
+                        '1c:Gamma','1d:Median','1e:Final'],
+                cols=3
+            )
+            save_result(grid, 1, base_name, 'F1_grid')
+
+            # ── Per-image summary line ────────────────────────────────────────
+            flags = (f"dark={profile['is_dark']} | wet={profile['is_wet']} | "
+                     f"aerial={profile['is_aerial']} | "
+                     f"mean={profile['mean']:.0f} std={profile['std']:.0f}")
+            print(f"OK  →  {flags}")
+            passed += 1
+
+        except Exception as e:
+            print(f"FAILED — {e}")
+            failed.append((img_path, str(e)))
+
+    # ── Batch summary ─────────────────────────────────────────────────────────
+    print(f"\n{'─'*55}")
+    print(f"Results: {passed}/{len(test_images)} passed")
+    if failed:
+        print("Failed images:")
+        for path, err in failed:
+            print(f"  {path} → {err}")
+    print(f"Outputs → data/results/feature1/<image_name>/")
+    print("=== Feature 1 batch test complete ===\n")
